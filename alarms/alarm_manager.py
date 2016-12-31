@@ -235,7 +235,7 @@ class Alarm_Manager(Thread):
 			'respawn_text': get_respawn_text(pkmn.get('respawn_info', 0)),
 			'kind': pkmn['kind'],
 			'links': pkmn['links'],
-			'spawnpoint_id': pkmn['spawnpoint_id'])
+			'spawnpoint_id': pkmn['spawnpoint_id']
 		}
 
 		pkmn_info = self.optional_arguments(pkmn_info)
