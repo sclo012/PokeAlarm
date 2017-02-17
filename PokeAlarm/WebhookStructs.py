@@ -55,7 +55,10 @@ class RocketMap:
             'move_2_id': int(move_2_id) if move_2_id is not None else 'unkn',
             'atk':  int(atk) if atk is not None else 'unkn',
             'def': int(def_) if def_ is not None else 'unkn',
-            'sta': int(sta) if sta is not None else 'unkn'
+            'sta': int(sta) if sta is not None else 'unkn',
+            'kind': data.get('kind'),
+            'links': data.get('links'),
+            'spawnpoint_id': data['spawnpoint_id']
         }
         pkmn['gmaps'] = get_gmaps_link(pkmn['lat'], pkmn['lng'])
         if atk is None or def_ is None or sta is None:
