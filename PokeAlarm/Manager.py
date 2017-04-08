@@ -21,7 +21,7 @@ log = logging.getLogger('Manager')
 
 class Manager(object):
 
-    def __init__(self, name, google_key, locale, units, timezone, time_limit, location, quiet,
+    def __init__(self, name, google_key, locale, units, timezone, time_limit, max_attempts, location, quiet,
                  filter_file, geofence_file, alarm_file, debug):
         # Set the name of the Manager
         self.__name = str(name).lower()
@@ -30,7 +30,8 @@ class Manager(object):
 
         # Get the Google Maps API
         self.__google_key = google_key
-        self.__gmaps_client = googlemaps.Client(key=self.__google_key, timeout=1) if google_key is not None else None
+        self.__gmaps_client = \
+            googlemaps.Client(key=self.__google_key, timeout=3, retry_timeout=4) if google_key is not None else None
         self.__api_req = {'REVERSE_LOCATION': False, 'WALK_DIST': False, 'BIKE_DIST': False, 'DRIVE_DIST': False}
 
         # Setup the language-specific stuff
@@ -57,7 +58,7 @@ class Manager(object):
             self.load_geofence_file(get_path(geofence_file))
         # Create the alarms to send notifications out with
         self.__alarms = []
-        self.load_alarms_file(get_path(alarm_file))
+        self.load_alarms_file(get_path(alarm_file), int(max_attempts))
 
         # Initialize the queue and start the process
         self.__queue = multiprocessing.Queue()
@@ -84,6 +85,8 @@ class Manager(object):
             log.info("Loading Filters from file at {}".format(file_path))
             with open(file_path, 'r') as f:
                 filters = json.load(f)
+            if type(filters) is not dict:
+                log.critical("Filters file's must be a JSON object: { \"pokemon\":{...},... }")
 
             # Load in the Pokemon Section
             self.__pokemon_settings = load_pokemon_section(
@@ -150,19 +153,22 @@ class Manager(object):
         log.debug("Stack trace: \n {}".format(traceback.format_exc()))
         sys.exit(1)
 
-    def load_alarms_file(self, file_path):
+    def load_alarms_file(self, file_path, max_attempts):
         log.info("Loading Alarms from the file at {}".format(file_path))
         try:
             with open(file_path, 'r') as f:
                 alarm_settings = json.load(f)
+            if type(alarm_settings) is not list:
+                log.critical("Alarms file must be a list of Alarms objects - [ {...}, {...}, ... {...} ]")
+                sys.exit(1)
             self.__alarms = []
             for alarm in alarm_settings:
-                if parse_boolean(alarm.pop('active')) is True:
-                    _type = alarm.pop('type')
+                if parse_boolean(require_and_remove_key('active', alarm, "Alarm objects in Alarms file.")) is True:
+                    _type = require_and_remove_key('type', alarm, "Alarm objects in Alarms file.")
                     self.set_optional_args(str(alarm))
                     if _type == 'discord':
                         from Discord import DiscordAlarm
-                        self.__alarms.append(DiscordAlarm(alarm, self.__google_key))
+                        self.__alarms.append(DiscordAlarm(alarm, max_attempts, self.__google_key))
                     elif _type == 'facebook_page':
                         from FacebookPage import FacebookPageAlarm
                         self.__alarms.append(FacebookPageAlarm(alarm))
@@ -187,6 +193,7 @@ class Manager(object):
                         sys.exit(1)
                 else:
                     log.debug("Alarm not activated: " + alarm['type'] + " because value not set to \"True\"")
+            log.info("{} active alarms found.".format(len(self.__alarms)))
             return  # all done
         except ValueError as e:
             log.error("Encountered error while loading Alarms file: {}: {}".format(type(e).__name__, e))
@@ -198,7 +205,7 @@ class Manager(object):
             log.error("PokeAlarm was unable to find a filters file at {}." +
                       "Please check that this file exists and PA has read permissions.").format(file_path)
         except Exception as e:
-            log.error("Encountered error while loading Filters: {}: {}".format(type(e).__name__, e))
+            log.error("Encountered error while loading Alarms: {}: {}".format(type(e).__name__, e))
         log.debug("Stack trace: \n {}".format(traceback.format_exc()))
         sys.exit(1)
 
@@ -332,6 +339,7 @@ class Manager(object):
         quick_id = pkmn['quick_id']
         charge_id = pkmn['charge_id']
         size = pkmn['size']
+        gender = pkmn['gender']
 
         filters = self.__pokemon_settings['filters'][pkmn_id]
         for filt_ct in range(len(filters)):
@@ -446,6 +454,18 @@ class Manager(object):
                     log.info("{} rejected: Size information was missing - (F #{})".format(name, filt_ct))
                     continue
                 log.debug("Pokemon 'size' was not checked because it was missing.")
+
+            # Check for a valid gender
+            if gender != 'unknown':
+                if not filt.check_gender(gender):
+                    if self.__quiet is False:
+                        log.info("{} rejected: Gender ({}) was not correct - (F #{})".format(name, gender, filt_ct))
+                    continue
+            else:
+                if filt.ignore_missing is True:
+                    log.info("{} rejected: Gender information was missing - (F #{})".format(name, filt_ct))
+                    continue
+                log.debug("Pokemon 'gender' was not checked because it was missing.")
 
             # Nothing left to check, so it must have passed
             passed = True
@@ -651,6 +671,7 @@ class Manager(object):
             "dist": get_dist_as_str(dist),
             'dir': get_cardinal_dir([lat, lng], self.__latlng),
             'new_team': cur_team,
+            'new_team_id': "team{}".format(to_team_id),
             'old_team': old_team
         })
         self.add_optional_travel_arguments(gym)
@@ -732,13 +753,14 @@ class Manager(object):
                 result = self.__gmaps_client.geocode(location_name)
                 loc = result[0]['geometry']['location']  # Get the first (most likely) result
                 latitude, longitude = loc.get("lat"), loc.get("lng")
-            log.info("Location found: {:f},{:f}".format(latitude, longitude))
+            log.info("Coordinates found for '{}': {:f},{:f}".format(location_name, latitude, longitude))
             return [latitude, longitude]
         except Exception as e:
             log.error("Encountered error while getting error by name ({}: {})".format(type(e).__name__, e))
             log.debug("Stack trace: \n {}".format(traceback.format_exc()))
-            log.error("Please make sure that your location is either the correct name of a place, or a pair of " +
-                      "coordinates seperated by either a space or a comma.")
+            log.error("Encounted error looking for location {}.".format(location_name)
+                      + "Please make sure your location is in the correct format")
+            sys.exit(1)
 
     # Returns the name of the location based on lat and lng
     def reverse_location(self, lat, lng):
